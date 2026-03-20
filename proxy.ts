@@ -16,14 +16,10 @@
  * Environment variables:
  *   OLLAMA_API_KEY      API key used ONLY for ClaimCheck's internal Nemotron calls
  *   REAL_LLM_BASE_URL   Where to forward LLM requests (default: http://localhost:11434)
- *   REAL_LLM_API_KEY    Only set this for cloud endpoints (OpenAI, Groq, etc.) that
- *                       require their OWN key. Leave unset for local Ollama — it manages
- *                       its own cloud model auth internally.
+ *   REAL_LLM_API_KEY    Only set for cloud endpoints needing their own key (OpenAI etc.)
  *   PROXY_PORT          Port this proxy listens on (default: 4001)
  *   DEFAULT_DOMAIN      Default domain for claim checking (default: general)
- *
- * Per-request domain override:
- *   curl -H "x-claimcheck-domain: cybersecurity" http://localhost:4001/v1/chat/completions ...
+ *   DEBUG               Set to "1" to print pipeline details to the proxy terminal
  */
 
 import express, { Request } from "express";
@@ -34,85 +30,96 @@ const PROXY_PORT   = parseInt(process.env.PROXY_PORT || "4001", 10);
 const REAL_LLM_URL = (process.env.REAL_LLM_BASE_URL || "http://localhost:11434").replace(/\/$/, "");
 const DEF_DOMAIN   = (process.env.DEFAULT_DOMAIN    || "general") as Domain;
 const FORWARD_KEY  = process.env.REAL_LLM_API_KEY   || "";
+const DEBUG        = process.env.DEBUG === "1";
 
 app.use(express.json({ limit: "10mb" }));
 
-/**
- * Build forwarding headers.
- * Always passes through ALL original request headers (so cloud model auth
- * tokens from the Ollama CLI are preserved). Strips only hop-by-hop headers
- * that must not be forwarded. Optionally overrides Authorization with
- * REAL_LLM_API_KEY when set (for external cloud endpoints).
- */
+function log(...args: any[]) {
+  if (DEBUG) console.log("[ClaimCheck]", ...args);
+}
+
 function buildForwardHeaders(req: Request): Record<string, string> {
   const skip = new Set([
     "host", "content-length", "transfer-encoding",
     "connection", "keep-alive", "proxy-authenticate",
     "proxy-authorization", "te", "trailers", "upgrade",
   ]);
-
   const h: Record<string, string> = {};
-
   for (const [key, value] of Object.entries(req.headers)) {
     if (skip.has(key.toLowerCase())) continue;
-    if (Array.isArray(value)) {
-      h[key] = value.join(", ");
-    } else if (value) {
-      h[key] = value;
-    }
+    h[key] = Array.isArray(value) ? value.join(", ") : (value ?? "");
   }
-
   h["Content-Type"] = "application/json";
-
-  if (FORWARD_KEY) {
-    h["Authorization"] = `Bearer ${FORWARD_KEY}`;
-  }
-
+  if (FORWARD_KEY) h["Authorization"] = `Bearer ${FORWARD_KEY}`;
   return h;
 }
 
 function inlineCitations(cited: Awaited<ReturnType<typeof findCitations>>): string {
   const refs: string[] = [];
   let idx = 0;
-  const body = cited.map(s => {
+  const lines = cited.map(s => {
     if (s.isClaim && s.citation) {
       refs.push(s.citation);
       idx++;
       return `${s.sentence} [${idx}]`;
     }
     return s.sentence;
-  }).join(" ");
+  });
 
+  const body = lines.join(" ");
   if (!refs.length) return body;
   const refBlock = "\n\n---\nSources:\n" + refs.map((r, i) => `[${i + 1}] ${r}`).join("\n");
   return body + refBlock;
 }
 
 async function runClaimCheck(text: string, domain: Domain): Promise<string> {
-  const marked      = await markClaims(text, domain);
+  console.log(`[ClaimCheck] Step 1: marking claims (domain=${domain}, chars=${text.length})`);
+  const marked = await markClaims(text, domain);
+  const claimCount = marked.filter(m => m.isClaim).length;
+  console.log(`[ClaimCheck] Step 1 done: ${marked.length} sentences, ${claimCount} claims`);
+
+  if (DEBUG) {
+    marked.filter(m => m.isClaim).forEach((m, i) =>
+      console.log(`  claim[${i}]: ${m.sentence.slice(0, 80)}...`)
+    );
+  }
+
+  if (claimCount === 0) {
+    console.log("[ClaimCheck] No claims found — returning original response unchanged");
+    return text;
+  }
+
   const shortlisted = shortlistClaims(marked);
-  const cited       = await findCitations(shortlisted, domain);
+  const shortCount  = shortlisted.filter(m => m.isClaim).length;
+  console.log(`[ClaimCheck] Step 2 done: shortlisted ${shortCount} claim(s) for citation`);
+
+  console.log("[ClaimCheck] Step 3: finding citations...");
+  const cited    = await findCitations(shortlisted, domain);
+  const citCount = cited.filter(c => c.isClaim && c.citation).length;
+  console.log(`[ClaimCheck] Step 3 done: ${citCount} citation(s) found`);
+
+  if (DEBUG) {
+    cited.filter(c => c.citation).forEach((c, i) =>
+      console.log(`  citation[${i}]: ${c.citation}`)
+    );
+  }
+
   return inlineCitations(cited);
 }
 
 /* ── Health ─────────────────────────────────────────────────────────────── */
 app.get("/health", (_req, res) => {
-  res.json({
-    status:         "ok",
-    mode:           "proxy",
-    target:         REAL_LLM_URL,
-    forwardAuthSet: !!FORWARD_KEY,
-  });
+  res.json({ status: "ok", mode: "proxy", target: REAL_LLM_URL, forwardAuthSet: !!FORWARD_KEY, debug: DEBUG });
 });
 
 /* ── OpenAI-compatible: POST /v1/chat/completions ────────────────────────── */
 app.post("/v1/chat/completions", async (req, res) => {
   const domain = (req.headers["x-claimcheck-domain"] as Domain) || DEF_DOMAIN;
   try {
+    log("→ /v1/chat/completions");
     const forwardRes = await fetch(`${REAL_LLM_URL}/v1/chat/completions`, {
-      method:  "POST",
-      headers: buildForwardHeaders(req),
-      body:    JSON.stringify({ ...req.body, stream: false }),
+      method: "POST", headers: buildForwardHeaders(req),
+      body: JSON.stringify({ ...req.body, stream: false }),
     });
     if (!forwardRes.ok) return res.status(forwardRes.status).send(await forwardRes.text());
 
@@ -124,6 +131,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     data.choices[0].finish_reason   = "stop";
     res.json(data);
   } catch (err: any) {
+    console.error("[ClaimCheck] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -132,10 +140,10 @@ app.post("/v1/chat/completions", async (req, res) => {
 app.post("/api/chat", async (req, res) => {
   const domain = (req.headers["x-claimcheck-domain"] as Domain) || DEF_DOMAIN;
   try {
+    log("→ /api/chat");
     const forwardRes = await fetch(`${REAL_LLM_URL}/api/chat`, {
-      method:  "POST",
-      headers: buildForwardHeaders(req),
-      body:    JSON.stringify({ ...req.body, stream: false }),
+      method: "POST", headers: buildForwardHeaders(req),
+      body: JSON.stringify({ ...req.body, stream: false }),
     });
     if (!forwardRes.ok) return res.status(forwardRes.status).send(await forwardRes.text());
 
@@ -146,6 +154,7 @@ app.post("/api/chat", async (req, res) => {
     data.message.content = verified;
     res.json(data);
   } catch (err: any) {
+    console.error("[ClaimCheck] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -154,10 +163,10 @@ app.post("/api/chat", async (req, res) => {
 app.post("/api/generate", async (req, res) => {
   const domain = (req.headers["x-claimcheck-domain"] as Domain) || DEF_DOMAIN;
   try {
+    log("→ /api/generate");
     const forwardRes = await fetch(`${REAL_LLM_URL}/api/generate`, {
-      method:  "POST",
-      headers: buildForwardHeaders(req),
-      body:    JSON.stringify({ ...req.body, stream: false }),
+      method: "POST", headers: buildForwardHeaders(req),
+      body: JSON.stringify({ ...req.body, stream: false }),
     });
     if (!forwardRes.ok) return res.status(forwardRes.status).send(await forwardRes.text());
 
@@ -168,6 +177,7 @@ app.post("/api/generate", async (req, res) => {
     data.response = verified;
     res.json(data);
   } catch (err: any) {
+    console.error("[ClaimCheck] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -176,9 +186,8 @@ app.post("/api/generate", async (req, res) => {
 app.all("*", async (req, res) => {
   try {
     const forwardRes = await fetch(`${REAL_LLM_URL}${req.path}`, {
-      method:  req.method,
-      headers: buildForwardHeaders(req),
-      body:    ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body),
+      method: req.method, headers: buildForwardHeaders(req),
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : JSON.stringify(req.body),
     });
     const txt = await forwardRes.text();
     res.status(forwardRes.status).send(txt);
@@ -192,5 +201,6 @@ app.listen(PROXY_PORT, "0.0.0.0", () => {
   console.log(`[ClaimCheck Proxy] forwarding to     ${REAL_LLM_URL}`);
   console.log(`[ClaimCheck Proxy] forward auth key:  ${FORWARD_KEY ? "set (REAL_LLM_API_KEY)" : "not set — passing original headers"}`);
   console.log(`[ClaimCheck Proxy] default domain:    ${DEF_DOMAIN}`);
+  console.log(`[ClaimCheck Proxy] debug logging:     ${DEBUG ? "ON" : "OFF (set DEBUG=1 to enable)"}`);
   console.log(`[ClaimCheck Proxy] in your shell:     export OLLAMA_HOST=http://localhost:${PROXY_PORT}`);
 });
