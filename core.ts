@@ -74,6 +74,7 @@ const MARK_EXAMPLES: Record<string, string> = {
   crystallography: "'MOFs with dia topology exhibit high gas storage capacity' is a claim. 'The graph has 12 vertices' is not.",
   social_network:  "'Nodes in the same orbit occupy structurally equivalent positions' is a claim. 'There are 3 generators' is not.",
   finance_research:"'Circular transaction patterns are a hallmark of wash trading' is a claim. 'The automorphism group order is 288' is not.",
+  general:         "'Shannon entropy measures the average uncertainty in a probability distribution' is a claim. 'The result is 2.3 bits' is not (it is a computed value, not a verifiable assertion about how something works).",
 };
 
 const CITE_CTX: Record<string, string> = {
@@ -82,6 +83,7 @@ const CITE_CTX: Record<string, string> = {
   crystallography: "crystallography, space groups, X-ray diffraction, Metal-Organic Frameworks, lattice symmetry",
   social_network:  "social network analysis, community detection, influence propagation, network centrality",
   finance_research:"financial fraud, anti-money laundering, wash trading, transaction networks, FATF typologies",
+  general:         "mathematics, information theory, computer science, physics, biology, engineering, and related fields",
 };
 
 /* ─── Step 1: markClaims ─────────────────────────────────────────────────── */
@@ -89,25 +91,22 @@ const CITE_CTX: Record<string, string> = {
 /**
  * Labels every sentence in an LLM response as a domain-knowledge claim or not.
  * Graph-structural observations (orbits, group order, node IDs) are never claims.
- *
- * @param responseText  Full LLM response string
- * @param domain        One of the supported domain keys, or "general"
- * @returns             Array of { sentence, isClaim }
  */
 export async function markClaims(
   responseText: string,
   domain: Domain | string = "general"
 ): Promise<MarkedSentence[]> {
-  const domainName = domain.replace(/_/g, " ");
-  const examples   = MARK_EXAMPLES[domain] ?? "'Automorphisms preserve edge structure' is a claim. 'Orbit 1 has 3 nodes' is not.";
+  const domainName = domain === "general" ? "general science and knowledge" : domain.replace(/_/g, " ");
+  const fieldCtx   = domain === "general" ? "" : " and graph theory";
+  const examples   = MARK_EXAMPLES[domain] ?? MARK_EXAMPLES["general"]!;
 
-  const prompt = `You are a claim identification agent specialising in ${domainName} and graph theory.
+  const prompt = `You are a claim identification agent specialising in ${domainName}${fieldCtx}.
 
 Read the text below sentence by sentence. For each sentence decide: CLAIM or NOT A CLAIM.
 
-CLAIM: A sentence asserting a verifiable real-world fact — how a named technique works, what a pattern means in ${domainName}, or established scientific knowledge. (${examples})
+CLAIM: A sentence asserting a verifiable real-world fact — how a named technique works, what a concept means, who discovered something, or established scientific knowledge. (${examples})
 
-NOT A CLAIM: Transition phrases, questions, greetings, list/table headers, sentences restating graph results, AND any sentence about the specific graph structure from this analysis (orbit sizes, group order, generators, node IDs, edge counts) — those are already grounded in exact computation.
+NOT A CLAIM: Transition phrases, questions, greetings, list or table headers, purely mathematical results, computed numbers, AND any sentence about specific graph structure (orbit sizes, group order, generators, node IDs, edge counts) — those are already grounded in exact computation.
 
 RULES:
 - Return ONLY a valid JSON array. No markdown, no preamble.
@@ -130,9 +129,6 @@ ${responseText}`;
 /**
  * Pure client-side helper — no LLM call.
  * Picks the 3 most specific-looking claims (by sentence length) and de-marks the rest.
- *
- * @param marked  Output of markClaims
- * @returns       Same array with at most 3 isClaim:true entries
  */
 export function shortlistClaims(marked: MarkedSentence[]): MarkedSentence[] {
   const claims = marked.filter(m => m.isClaim);
@@ -149,28 +145,24 @@ export function shortlistClaims(marked: MarkedSentence[]): MarkedSentence[] {
 
 /**
  * For each isClaim:true sentence, finds a real published citation.
- * Sentences with no verifiable source are de-marked (isClaim becomes false).
+ * Sentences with no verifiable source are de-marked.
  * Never fabricates references.
- *
- * @param marked  Typically the output of shortlistClaims (3 claims max)
- * @param domain  Domain key for citation context
- * @returns       Array of { sentence, isClaim, citation }
  */
 export async function findCitations(
   marked: MarkedSentence[],
   domain: Domain | string = "general"
 ): Promise<CitedSentence[]> {
-  const domainName = domain.replace(/_/g, " ");
-  const ctx        = CITE_CTX[domain] ?? "graph theory, network science, combinatorics";
+  const domainName = domain === "general" ? "general science and knowledge" : domain.replace(/_/g, " ");
+  const ctx        = CITE_CTX[domain] ?? CITE_CTX["general"]!;
 
   const claims = marked.filter(m => m.isClaim);
   if (!claims.length) return marked.map(m => ({ ...m, citation: null }));
 
   const list   = claims.map((m, i) => `${i + 1}. ${m.sentence}`).join("\n");
 
-  const prompt = `You are a citation agent for ${domainName} and graph theory.
+  const prompt = `You are a citation agent for ${domainName}.
 
-For EACH numbered claim, find a specific, real published paper or authoritative report that directly supports that exact assertion in the context of ${ctx}.
+For EACH numbered claim, find a specific, real published paper or authoritative source that directly supports that exact assertion in the context of ${ctx}.
 
 Rules:
 - Source must directly support the claim, not just the general topic.
