@@ -5,15 +5,14 @@
  * The canonical standalone package lives at: github.com/vaibh-pra/veriphy-agent
  */
 
-const OLLAMA_BASE_URL = "https://ollama.com/v1";
-const OLLAMA_MODEL    = "nemotron-3-super:cloud";
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "https://ollama.com/v1";
+const OLLAMA_MODEL    = process.env.OLLAMA_MODEL    || "nemotron-3-super:cloud";
 
 export interface MarkedSentence { sentence: string; isClaim: boolean; }
 export interface CitedSentence  { sentence: string; isClaim: boolean; citation: string | null; }
 
 async function llm(messages: { role: string; content: string }[]): Promise<string> {
-  const key = process.env.OLLAMA_API_KEY;
-  if (!key) throw new Error("OLLAMA_API_KEY is not set");
+  const key = process.env.OLLAMA_API_KEY || "";
   for (let attempt = 0; attempt <= 3; attempt++) {
     if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * attempt));
     try {
