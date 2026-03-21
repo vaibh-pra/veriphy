@@ -171,7 +171,7 @@
 
     var selected = [];
     for (var i = 0; i < candidates.length; i++) {
-      if (selected.length >= 3) break;
+      if (selected.length >= 5) break;
       var candidate = candidates[i].sentence;
       var tooSimilar = selected.some(function(s) {
         return jaccardSimilarity(s, candidate) > 0.55;
