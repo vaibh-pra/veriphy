@@ -152,17 +152,37 @@
     }
   };
 
-  /* Step 2 — client-side: pick top 3 by length, de-mark the rest */
+  /* Jaccard word-overlap similarity between two sentences (0–1) */
+  function jaccardSimilarity(a, b) {
+    var wordsA = new Set((a.toLowerCase().match(/\w+/g) || []));
+    var wordsB = new Set((b.toLowerCase().match(/\w+/g) || []));
+    var intersection = 0;
+    wordsA.forEach(function(w) { if (wordsB.has(w)) intersection++; });
+    var union = new Set([...wordsA, ...wordsB]).size;
+    return union === 0 ? 0 : intersection / union;
+  }
+
+  /* Step 2 — client-side: pick up to 3 diverse claims.
+     Skips any candidate that is too similar (>55% word overlap)
+     to a claim already selected. */
   VerificationAgent.prototype.shortlist = function () {
-    const claims = this._marked.filter(m => m.isClaim);
-    const top3   = new Set(
-      [...claims].sort((a, b) => b.sentence.length - a.sentence.length)
-                 .slice(0, 3)
-                 .map(m => m.sentence)
-    );
+    var candidates = this._marked.filter(m => m.isClaim)
+                       .sort((a, b) => b.sentence.length - a.sentence.length);
+
+    var selected = [];
+    for (var i = 0; i < candidates.length; i++) {
+      if (selected.length >= 3) break;
+      var candidate = candidates[i].sentence;
+      var tooSimilar = selected.some(function(s) {
+        return jaccardSimilarity(s, candidate) > 0.55;
+      });
+      if (!tooSimilar) selected.push(candidate);
+    }
+
+    var selectedSet = new Set(selected);
     this._shortlisted = this._marked.map(m => ({
       sentence: m.sentence,
-      isClaim:  m.isClaim && top3.has(m.sentence),
+      isClaim:  m.isClaim && selectedSet.has(m.sentence),
     }));
     this._renderStep2();
   };
