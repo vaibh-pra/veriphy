@@ -1,7 +1,7 @@
 {
-  "name": "verifi-agent",
+  "name": "veriphy-agent",
   "version": "1.1.0",
-  "displayName": "Verifi",
+  "displayName": "Veriphy",
   "description": "A three-step agent that post-processes any LLM response to identify verifiable factual claims, shortlist the 3 most distinctive ones (using Jaccard similarity deduplication), and retrieve real arXiv paper citations for each. Works with any topic \u2014 no domain configuration needed.",
   "author": "Automorph",
   "license": "MIT",
