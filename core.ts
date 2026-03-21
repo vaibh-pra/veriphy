@@ -51,18 +51,41 @@ function parseJsonArray(raw: string): any[] | null {
     if (esc)             { esc = false; continue; }
     if (ch === "\\" && inStr) { esc = true;  continue; }
     if (ch === '"')      { inStr = !inStr; continue; }
-    if (inStr)           continue;            // inside a string — ignore brackets
+    if (inStr)           continue;
     if (ch === "[")      depth++;
     else if (ch === "]") { depth--; if (depth === 0) { end = i; break; } }
   }
-  if (end === -1) return null;
 
-  const candidate = raw.slice(start, end + 1);
-  // Try 1: as-is
-  try { return JSON.parse(candidate); } catch (_) {}
-  // Try 2: replace unescaped control chars (incl. raw newlines inside string values)
-  try { return JSON.parse(candidate.replace(/[\x00-\x1F\x7F]/g, " ")); } catch (_) {}
-  return null;
+  if (end !== -1) {
+    const candidate = raw.slice(start, end + 1);
+    // Try 1: as-is
+    try { return JSON.parse(candidate); } catch (_) {}
+    // Try 2: replace raw control chars (incl. unescaped newlines inside string values)
+    try { return JSON.parse(candidate.replace(/[\x00-\x1F\x7F]/g, " ")); } catch (_) {}
+  }
+
+  // Try 3: object-by-object regex extraction — survives unescaped quotes or other
+  // character-level corruption that breaks the whole-array parse.
+  const results: any[] = [];
+  const objRe = /\{[^{}]{1,4000}\}/gs;
+  let m: RegExpExecArray | null;
+  while ((m = objRe.exec(raw)) !== null) {
+    const obj = m[0];
+    // Attempt JSON.parse on the individual object first
+    try {
+      const parsed = JSON.parse(obj);
+      if (typeof parsed.sentence === "string" && typeof parsed.isClaim === "boolean") {
+        results.push(parsed); continue;
+      }
+    } catch (_) {}
+    // Regex fallback: extract sentence and isClaim independently
+    const sentM  = obj.match(/"sentence"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const claimM = obj.match(/"isClaim"\s*:\s*(true|false)/);
+    if (sentM && claimM) {
+      results.push({ sentence: sentM[1].replace(/\\"/g, '"'), isClaim: claimM[1] === "true" });
+    }
+  }
+  return results.length > 0 ? results : null;
 }
 
 const MARK_EXAMPLES: Record<string, string> = {
