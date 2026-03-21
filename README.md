@@ -1,6 +1,6 @@
 # ClaimCheck Verification Agent
 
-A standalone, three-step AI agent that post-processes any LLM chatbot response to identify domain-knowledge claims, shortlist the most verifiable ones, and find accurate published citations for each.
+A standalone, three-step agent that post-processes any LLM chatbot response to identify domain-knowledge claims, shortlist the most verifiable and diverse ones, and look up real published papers on arXiv for each.
 
 Built as part of the [Automorph](https://github.com/vaibh-pra/automorph-backend) project — an AI-powered graph automorphism analysis platform — but designed to work with **any** LLM chatbot.
 
@@ -13,27 +13,48 @@ LLM responses often mix two fundamentally different kinds of sentences:
 - **Graph-structural observations** — orbit sizes, group order, generators, node IDs. These come from exact computation (Nauty) and need no verification.
 - **Domain-knowledge claims** — assertions about how algorithms behave, what patterns mean in a field, established scientific findings. These *can* be wrong or hallucinated.
 
-ClaimCheck separates the two and traces the second kind back to real sources.
+ClaimCheck separates the two and traces the second kind back to real arXiv papers.
 
 ---
 
 ## Three-Step Pipeline
 
 ```
-Step 1  markClaims()       LLM reads every sentence and labels it as a
-                           domain-knowledge claim or not. Graph-structural
-                           observations are never marked.
+Step 1  markClaims()       LLM (Nemotron) reads every sentence and labels
+                           it CLAIM or NOT A CLAIM. Graph-structural
+                           observations are never marked as claims.
+                           Uses: OLLAMA_API_KEY
 
-Step 2  shortlistClaims()  Client-side (no LLM call). Picks the 3 most
-                           specific-looking claims by sentence length and
-                           de-marks the rest.
+Step 2  shortlistClaims()  Client-side — no LLM, no API key needed.
+                           Picks up to 3 claims greedily by sentence length,
+                           skipping any candidate whose words overlap >55%
+                           with an already-selected claim (Jaccard filter).
+                           Near-duplicate claims are deduplicated here.
 
-Step 3  findCitations()    LLM finds one real published source per shortlisted
-                           claim. Claims with no verifiable source are
-                           de-marked. Nothing is fabricated.
+Step 3  findCitations()    Queries the arXiv API — no LLM, no API key.
+                           Extracts key terms from each claim, searches
+                           arXiv, and returns the top result as the citation.
+                           All 3 searches run in parallel (<1 s typical).
+                           Claims with no arXiv result are de-marked.
 ```
 
-The final output is the original response with up to 3 sentences annotated with citations — every other sentence is left exactly as-is.
+**Only Step 1 uses an LLM.** Steps 2 and 3 are entirely LLM-free.
+
+The final output is the original response with up to 3 sentences annotated with arXiv citations — every other sentence is left exactly as-is.
+
+---
+
+## Citation Rendering
+
+When two claims resolve to the same paper, they share the same `[N]` reference number and the source is listed only once:
+
+```
+Botnets use hierarchical overlays for resilience. [1]
+Mirai used a similar command-and-control topology. [1]   ← same paper, reused
+
+Sources:
+[1] Antonakakis et al., "Understanding the Mirai Botnet", USENIX Security, arXiv:...
+```
 
 ---
 
@@ -46,7 +67,7 @@ The final output is the original response with up to 3 sentences annotated with 
 | `crystallography` | Space groups, X-ray diffraction, Metal-Organic Frameworks |
 | `social_network` | Community detection, influence propagation, network centrality |
 | `finance_research` | AML, wash trading, transaction network fraud, FATF typologies |
-| `general` | Graph theory, network science, combinatorics |
+| `general` | Mathematics, information theory, computer science, physics, engineering |
 
 ---
 
@@ -58,7 +79,7 @@ claimcheck-agent/
   server.ts      Standalone API server (port 4000)
   proxy.ts       Transparent LLM proxy (port 4001) — intercepts before terminal display
   cli.ts         CLI tool — calls any LLM and shows annotated output in terminal
-  client.js      Drop-in frontend class for any chatbot page (zero dependencies)
+  client.js      Drop-in frontend widget for any chatbot page (zero dependencies)
   agent.json     Marketplace manifest — capabilities, schemas, env requirements
   package.json   npm package definition
   Dockerfile     Container definition
@@ -74,7 +95,6 @@ The proxy sits between you and Ollama or any cloud LLM. Every response is verifi
 
 ```bash
 # 1. Start the proxy in a background terminal
-REAL_LLM_BASE_URL=http://localhost:11434 \
 OLLAMA_API_KEY=your_key \
 DEFAULT_DOMAIN=cybersecurity \
 npm run proxy
@@ -88,165 +108,67 @@ export OLLAMA_HOST=http://localhost:4001
 ollama run llama3 "Explain how botnets use graph topology"
 ```
 
-Works with cloud LLMs too:
+**Forwarding to a cloud LLM** (OpenAI, Anthropic, etc.):
 
 ```bash
 REAL_LLM_BASE_URL=https://api.openai.com \
-OLLAMA_API_KEY=sk-... \
+REAL_LLM_API_KEY=sk-your-openai-key \
+OLLAMA_API_KEY=your_nemotron_key \
 npm run proxy
 # Then point your client's base URL to http://localhost:4001
 ```
 
-To override the domain per request, pass a header:
+Note: `OLLAMA_API_KEY` is used **only** for ClaimCheck's internal Nemotron calls (Step 1).
+`REAL_LLM_API_KEY` is forwarded to the upstream LLM and is optional for local Ollama.
+
+**Override domain per request** by passing a header:
 
 ```bash
 curl -X POST http://localhost:4001/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "x-claimcheck-domain: finance_research" \
-  -d '{"model":"llama3","messages":[{"role":"user","content":"Explain wash trading"}]}'
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Explain wash trading"}]}'
 ```
 
-The proxy handles Ollama native endpoints (`/api/chat`, `/api/generate`) and the OpenAI-compatible endpoint (`/v1/chat/completions`). Everything else is forwarded unchanged.
-
----
-
-### Mode 2 — CLI (direct terminal usage)
-
-The CLI calls the LLM itself, buffers the full response, runs it through ClaimCheck, then prints the annotated result. The raw unverified response is never shown.
+**Enable verbose logging:**
 
 ```bash
-# Basic
-npx tsx cli.ts "Explain how botnets work"
-
-# With domain and model
-npx tsx cli.ts --domain cybersecurity --model llama3:latest \
-  "Explain botnet C2 topology"
-
-# Cloud LLM
-npx tsx cli.ts \
-  --base-url https://api.openai.com \
-  --key sk-... \
-  --model gpt-4o \
-  --domain finance_research \
-  "Explain wash trading in financial networks"
-
-# Pipe mode — works with any LLM that writes to stdout
-ollama run llama3 "Explain botnets" | npx tsx cli.ts --domain cybersecurity
-
-# Mark claims only, skip the citation step
-npx tsx cli.ts --no-cite --domain ppi_network "How does PLK1 regulate mitosis?"
-```
-
-**Example terminal output:**
-
-```
-── Verified Response ──────────────────────────────────────────
-
-Botnets often use star topologies for command and control communication. [1]
-Compromised machines send beacons at randomised intervals to evade detection.
-The Mirai botnet notably exploited default IoT credentials for rapid propagation. [2]
-
-── Citations ───────────────────────────────────────────────────
-[1] Gu et al., "BotSniffer: Detecting Botnet Command and Control Channels", NDSS, 2008
-[2] Antonakakis et al., "Understanding the Mirai Botnet", USENIX Security, 2017
+DEBUG=1 OLLAMA_API_KEY=your_key npm run proxy
+# Shows:
+# [markClaims] raw LLM output (first 600 chars): ...
+# [arXiv] query: arithmetic coding huffman compression efficiency
+# [arXiv] found: Hashimoto et al. (2022) arXiv:2209.08874v1
 ```
 
 ---
 
-### Mode 3 — API server (for app integration)
+### Mode 2 — CLI
+
+```bash
+# Pipe any LLM output through ClaimCheck
+ollama run llama3 "Explain Shannon entropy" | npx tsx cli.ts
+
+# Or with a specific domain
+DEFAULT_DOMAIN=cybersecurity ollama run llama3 "..." | npx tsx cli.ts
+```
+
+---
+
+### Mode 3 — API server
 
 ```bash
 npm start
-# Running on http://localhost:4000
-```
+# Listening on port 4000
 
----
+# Mark claims
+curl -X POST http://localhost:4000/api/mark-claims \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Botnets use star topologies...","domain":"cybersecurity"}'
 
-### Mode 4 — Drop-in frontend script (for web chatbots)
-
-```html
-<script src="https://your-agent-url/client.js"></script>
-<script>
-  const agent = new VerificationAgent({
-    container: document.getElementById('chat-response'),
-    apiBase:   'https://your-agent-url',
-    domain:    'cybersecurity'
-  });
-  await agent.run(llmResponseText);
-</script>
-```
-
----
-
-## Quick Start
-
-```bash
-git clone https://github.com/vaibh-pra/claimcheck-agent.git
-cd claimcheck-agent
-npm install
-```
-
-Then pick a mode above.
-
-### Docker (proxy + API server)
-
-```bash
-docker build -t claimcheck-agent .
-docker run \
-  -e OLLAMA_API_KEY=your_key \
-  -e REAL_LLM_BASE_URL=http://host.docker.internal:11434 \
-  -e DEFAULT_DOMAIN=cybersecurity \
-  -p 4000:4000 -p 4001:4001 \
-  claimcheck-agent
-```
-
----
-
-## API Reference
-
-### `GET /health`
-
-```json
-{ "status": "ok", "agent": "verification-agent", "version": "1.1.0" }
-```
-
-### `POST /api/mark-claims`
-
-**Request**
-```json
-{ "responseText": "...", "domain": "cybersecurity" }
-```
-**Response**
-```json
-{
-  "marked": [
-    { "sentence": "Botnets often use star topologies for C2 communication.", "isClaim": true },
-    { "sentence": "The graph has 12 nodes and group order 36.", "isClaim": false }
-  ]
-}
-```
-
-### `POST /api/shortlist-claims`
-
-Picks the top 3 claims. No LLM call.
-
-**Request:** `{ "marked": [...] }`
-**Response:** `{ "shortlisted": [...] }`
-
-### `POST /api/find-citations`
-
-**Request:** `{ "marked": [...], "domain": "cybersecurity" }`
-**Response:**
-```json
-{
-  "cited": [
-    {
-      "sentence": "Botnets often use star topologies for C2 communication.",
-      "isClaim": true,
-      "citation": "Gu et al., \"BotSniffer: Detecting Botnet Command and Control Channels\", NDSS, 2008"
-    }
-  ]
-}
+# Find citations (arXiv — no LLM key needed)
+curl -X POST http://localhost:4000/api/find-citations \
+  -H "Content-Type: application/json" \
+  -d '{"marked":[...],"domain":"cybersecurity"}'
 ```
 
 ---
@@ -256,9 +178,14 @@ Picks the top 3 claims. No LLM call.
 ```ts
 import { markClaims, shortlistClaims, findCitations } from './core';
 
+// Step 1 — requires OLLAMA_API_KEY
 const marked      = await markClaims(responseText, 'finance_research');
+
+// Step 2 — pure function, no I/O
 const shortlisted = shortlistClaims(marked);
-const cited       = await findCitations(shortlisted, 'finance_research');
+
+// Step 3 — queries arXiv API, no LLM key needed
+const cited       = await findCitations(shortlisted);
 ```
 
 ---
@@ -267,27 +194,45 @@ const cited       = await findCitations(shortlisted, 'finance_research');
 
 | Variable | Required | Description |
 |---|---|---|
-| `OLLAMA_API_KEY` | Yes | API key for the Ollama cloud endpoint |
-| `PORT` | No (default: 4000) | Port for the API server |
+| `OLLAMA_API_KEY` | Yes | API key for Nemotron (Step 1 only) |
+| `PORT` | No (default: 4000) | Port for the standalone API server |
 | `PROXY_PORT` | No (default: 4001) | Port for the proxy server |
-| `REAL_LLM_BASE_URL` | Proxy only | Where to forward LLM requests (default: http://localhost:11434) |
-| `DEFAULT_DOMAIN` | No (default: general) | Default domain for claim checking |
+| `REAL_LLM_BASE_URL` | Proxy only | Upstream LLM base URL (default: `http://localhost:11434`) |
+| `REAL_LLM_API_KEY` | No | Auth key forwarded to the upstream LLM (omit for local Ollama) |
+| `DEFAULT_DOMAIN` | No (default: `general`) | Domain used when no `x-claimcheck-domain` header is sent |
+| `DEBUG` | No | Set to `1` to log raw LLM output and arXiv queries to the console |
 
 ---
 
 ## Design Decisions
 
 **Why shortlist only 3 claims?**
-Finding citations is an LLM call and costs latency. Three is the sweet spot — enough to add value, few enough to stay fast.
+Finding citations involves network requests to arXiv. Three is the sweet spot — enough to add value, few enough to stay fast (all 3 are fetched in parallel).
+
+**Why the Jaccard similarity filter in Step 2?**
+Without it, an LLM that says the same thing in two slightly different sentences would fill all 3 citation slots with near-identical content. The filter (>55% word overlap = skip) ensures the 3 cited claims are genuinely distinct.
+
+**Why arXiv instead of an LLM for citations?**
+LLMs recall citations from training data, which means fabricated titles, wrong years, and non-existent venues. arXiv returns real papers with real IDs. If arXiv finds nothing for a claim, the claim is de-marked rather than cited with a hallucination.
 
 **Why exclude graph-structural observations?**
 They come from Nauty, an exact mathematical computation. They are already verified by definition. Marking them as claims would be misleading.
 
 **Why de-mark claims with no source?**
-A claim with a fabricated citation is worse than no citation at all. If the LLM cannot find a real specific source, the sentence silently reverts to plain text.
+A claim with a fabricated citation is worse than no citation at all. If arXiv finds nothing for a claim, the sentence silently reverts to plain text.
 
 **Why buffer the response before display?**
 ClaimCheck needs the complete response to identify which sentences are claims. Buffering gives a clean single-pass annotated result. The raw unverified text is never shown.
+
+---
+
+## JSON Parsing Robustness
+
+Step 1 asks Nemotron to return a JSON array. Because Nemotron is a reasoning model, its output may include thinking tokens, markdown formatting, or occasionally unescaped characters inside string values. The parser uses three fallback levels:
+
+1. **Whole-array parse** — `JSON.parse` on the balanced `[{...}]` block (string-aware bracket balancer skips `[` and `]` inside string values).
+2. **Control-char cleanup** — strips raw newlines and control characters embedded in string values, then re-tries `JSON.parse`.
+3. **Object-by-object extraction** — scans for individual `{...}` blobs and parses each independently. A single malformed sentence cannot drop the rest of the response.
 
 ---
 
