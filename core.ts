@@ -40,10 +40,21 @@ async function llm(messages: { role: string; content: string }[]): Promise<strin
 }
 
 function parseJsonArray(raw: string): any[] | null {
-  const m = raw.match(/\[[\s\S]*\]/);
-  if (!m) return null;
-  try { return JSON.parse(m[0]); } catch (_) {}
-  try { return JSON.parse(m[0].replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")); } catch (_) {}
+  // Search for the first array-of-objects: skip scalar arrays like [1], [citation needed]
+  const start = raw.search(/\[\s*\{/);
+  if (start === -1) return null;
+
+  // Balance brackets to find the exact end of the array
+  let depth = 0, end = -1;
+  for (let i = start; i < raw.length; i++) {
+    if (raw[i] === "[") depth++;
+    else if (raw[i] === "]") { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end === -1) return null;
+
+  const candidate = raw.slice(start, end + 1);
+  try { return JSON.parse(candidate); } catch (_) {}
+  try { return JSON.parse(candidate.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")); } catch (_) {}
   return null;
 }
 
@@ -79,7 +90,9 @@ RULES:
 Text:
 ${responseText}`;
   const raw    = await llm([{ role: "system", content: prompt }, { role: "user", content: "Return the JSON array now." }]);
+  if (process.env.DEBUG === "1") console.log("[markClaims] raw LLM output (first 600 chars):", raw.slice(0, 600));
   const parsed = parseJsonArray(raw);
+  if (process.env.DEBUG === "1" && !parsed) console.log("[markClaims] parseJsonArray returned null — full raw:\n", raw);
   return Array.isArray(parsed) ? (parsed as MarkedSentence[]) : [];
 }
 
