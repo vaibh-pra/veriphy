@@ -128,7 +128,7 @@ function jaccardSimilarity(a: string, b: string): number {
   return union === 0 ? 0 : intersection / union;
 }
 
-export function shortlistClaims(marked: MarkedSentence[], maxClaims = 3, similarityThreshold = 0.55): MarkedSentence[] {
+export function shortlistClaims(marked: MarkedSentence[], maxClaims = 5, similarityThreshold = 0.55): MarkedSentence[] {
   const candidates = [...marked.filter(m => m.isClaim)]
     .sort((a, b) => b.sentence.length - a.sentence.length);
 
