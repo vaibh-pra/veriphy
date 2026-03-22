@@ -95,15 +95,19 @@ function truncateToSentenceBoundary(text: string, maxChars: number): string {
   return lastBoundary > maxChars * 0.5 ? cut.slice(0, lastBoundary + 1) : cut;
 }
 
-export async function markClaims(responseText: string, _domain?: string): Promise<MarkedSentence[]> {
+export async function markClaims(responseText: string, _domain?: string, query?: string): Promise<MarkedSentence[]> {
   const text = truncateToSentenceBoundary(responseText, MAX_MARK_CHARS);
   if (text.length < responseText.length && process.env.DEBUG === "1")
     console.log(`[Veriphy] Input truncated ${responseText.length} → ${text.length} chars for claim marking`);
 
+  const queryContext = query
+    ? `\nThe user's original question was: "${query}"\nPrioritise marking sentences as CLAIM if they directly answer or are highly relevant to this question.\n`
+    : "";
+
   const prompt = `You are Veriphy — an AI claim identification agent.
 
 Read the text below sentence by sentence. For each sentence decide: CLAIM or NOT A CLAIM.
-
+${queryContext}
 CLAIM: A sentence asserting a specific, verifiable fact — how a named technique, algorithm, or system works; an established scientific finding; a measurable property; or a relationship supported by literature.
 Examples:
 - "Arithmetic coding approaches the theoretical entropy limit for data compression." → CLAIM
@@ -146,9 +150,22 @@ function jaccardSimilarity(a: string, b: string): number {
   return union === 0 ? 0 : intersection / union;
 }
 
-export function shortlistClaims(marked: MarkedSentence[], maxClaims = 5, similarityThreshold = 0.55): MarkedSentence[] {
+export function shortlistClaims(marked: MarkedSentence[], maxClaims = 5, similarityThreshold = 0.55, query?: string): MarkedSentence[] {
+  const queryWords = query
+    ? new Set((query.toLowerCase().match(/\w+/g) || []).filter(w => w.length > 2))
+    : null;
+
+  // Score each claim: if a query is provided, rank by word-overlap with query;
+  // otherwise fall back to sentence length as a proxy for specificity.
+  function relevanceScore(sentence: string): number {
+    if (!queryWords || queryWords.size === 0) return sentence.length;
+    const sentWords = (sentence.toLowerCase().match(/\w+/g) || []);
+    const overlap = sentWords.filter(w => queryWords.has(w)).length;
+    return overlap / Math.sqrt(queryWords.size); // normalise by query length
+  }
+
   const candidates = [...marked.filter(m => m.isClaim)]
-    .sort((a, b) => b.sentence.length - a.sentence.length);
+    .sort((a, b) => relevanceScore(b.sentence) - relevanceScore(a.sentence));
 
   const selected: string[] = [];
   for (const candidate of candidates) {
