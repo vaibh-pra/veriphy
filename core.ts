@@ -4,55 +4,135 @@
  * Exports three functions used by /api/mark-claims and /api/find-citations.
  * The canonical standalone package lives at: github.com/vaibh-pra/veriphy-agent
  *
- * Step 1 (markClaims) uses fast rule-based detection — no LLM required.
- * Step 2 (shortlistClaims) deduplicates via Jaccard similarity.
- * Step 3 (findCitations) queries the arXiv API for real paper citations.
+ * Step 1 (markClaims)     — LLM labels each sentence as CLAIM or NOT A CLAIM
+ * Step 2 (shortlistClaims) — Jaccard deduplication, top 5 diverse claims
+ * Step 3 (findCitations)   — arXiv API lookup, no LLM needed
  */
+
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || "http://localhost:11434/v1";
+const OLLAMA_MODEL    = process.env.OLLAMA_MODEL    || "nemotron-3-super:cloud";
 
 export interface MarkedSentence { sentence: string; isClaim: boolean; }
 export interface CitedSentence  { sentence: string; isClaim: boolean; citation: string | null; }
 
-// ── Step 1: Rule-based claim detection ──────────────────────────────────────
+// ── LLM call (Step 1 only) ───────────────────────────────────────────────────
 
-const FILLER_PREFIX = /^(here\b|let me\b|now\b|next\b|first\b|second\b|third\b|finally\b|in summary\b|to summarize\b|note that\b|keep in mind\b|sure\b|certainly\b|of course\b|absolutely\b|in conclusion\b|as (a result|mentioned|noted|shown|you can see)\b)/i;
-const SUBJECTIVE    = /\b(i think|i believe|i feel|i would|in my opinion|personally|perhaps|maybe|might want|it seems|seems like|feel free)\b/i;
-
-const CLAIM_PATTERNS: RegExp[] = [
-  /\d+(\.\d+)?\s*(%|percent|x\b|times\b|ms\b|ns\b|gb\b|mb\b|tb\b|kb\b|hz\b|khz\b|mhz\b|ghz\b|km\b|kg\b|nm\b|db\b|bits?\b|bytes?\b|tokens?\b|parameters?\b)/i,
-  /\bin\s+(1[5-9]\d{2}|20\d{2})\b/,
-  /\b(since|by|until|before|after)\s+(1[5-9]\d{2}|20\d{2})\b/i,
-  /\b(showed?|demonstrates?|demonstrated|proved?|discovered|found\s+that|published|proposed|introduced|reported|achieved|established|confirmed|verified|revealed)\b/i,
-  /\b(outperforms?|faster\s+than|better\s+than|more\s+(accurate|efficient|robust|effective|reliable|stable|scalable)|fewer\s+than|higher\s+than|lower\s+than|reduces?|improves?|increases?|decreases?|boosts?)\b/i,
-  /\b(because|therefore|thus|hence|consequently|as\s+a\s+result|due\s+to|leads?\s+to|causes?|results?\s+in|enables?|allows?|prevents?)\b/i,
-  /\b(according\s+to|research\s+(shows?|suggests?|indicates?)|studies?\s+(show|suggest|indicate|found)|evidence\s+(suggests?|shows?|indicates?)|literature\s+(shows?|suggests?))\b/i,
-  /\b[A-Z]{2,}\b/,
-  /\b[A-Z][a-z]{1,15}(?:\s+[A-Z][a-z]{1,15}){1,3}\s+(is|are|was|were|has|have|can|will|does|provides?|enables?|uses?|relies?)\b/,
-  /\b(algorithm|neural|quantum|protein|gene|molecule|entropy|frequency|wavelength|voltage|current|photon|electron|neuron|synapse|receptor|enzyme|chromosome|genome|membrane|catalyst|polymer|semiconductor|transistor|bandwidth|latency|throughput|accuracy|precision|recall|gradient|eigenvalue|Hamiltonian|Lagrangian|topology|manifold|tensor|Fourier|Bayesian|Markov)\b/i,
-];
-
-function splitIntoSentences(text: string): string[] {
-  const abbrevs = /\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|e\.g|i\.e|Fig|Eq|Ref|Sec|Vol|No|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec|approx|est|max|min|avg)\./gi;
-  const safe = text.replace(abbrevs, m => m.slice(0, -1) + "\x00");
-  const parts = safe.split(/(?<=[.!?])\s+(?=[A-Z0-9"'\(\[])/);
-  return parts
-    .map(s => s.replace(/\x00/g, ".").trim())
-    .filter(s => s.length > 20);
+async function llm(messages: { role: string; content: string }[]): Promise<string> {
+  const key = process.env.OLLAMA_API_KEY || "";
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * attempt));
+    try {
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 240_000);
+      const res   = await fetch(`${OLLAMA_BASE_URL}/chat/completions`, {
+        method:  "POST",
+        headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+        body:    JSON.stringify({ model: OLLAMA_MODEL, messages, max_tokens: 8192, stream: false }),
+        signal:  ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (res.status === 503 || res.status === 429) continue;
+      if (!res.ok) throw new Error(`Ollama error ${res.status}`);
+      const data = await res.json() as any;
+      return data.choices?.[0]?.message?.content ?? "";
+    } catch (e: any) {
+      if (e.name === "AbortError") throw new Error("LLM timed out after 4 minutes — try a shorter prompt");
+      if (attempt >= 3) throw e;
+    }
+  }
+  throw new Error("Ollama unavailable after retries");
 }
 
-function isClaimRuleBased(sentence: string): boolean {
-  const s = sentence.trim();
-  if (s.length < 25)             return false;
-  if (s.endsWith("?"))           return false;
-  if (FILLER_PREFIX.test(s))     return false;
-  if (SUBJECTIVE.test(s))        return false;
-  return CLAIM_PATTERNS.some(p => p.test(s));
+// ── Robust JSON parser (3-level fallback) ────────────────────────────────────
+
+function parseJsonArray(raw: string): any[] | null {
+  const start = raw.search(/\[\s*\{/);
+  if (start === -1) return null;
+
+  let depth = 0, end = -1, inStr = false, esc = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (esc)              { esc = false; continue; }
+    if (ch === "\\" && inStr) { esc = true; continue; }
+    if (ch === '"')       { inStr = !inStr; continue; }
+    if (inStr)            continue;
+    if (ch === "[")       depth++;
+    else if (ch === "]")  { depth--; if (depth === 0) { end = i; break; } }
+  }
+
+  if (end !== -1) {
+    const candidate = raw.slice(start, end + 1);
+    try { return JSON.parse(candidate); } catch (_) {}
+    try { return JSON.parse(candidate.replace(/[\x00-\x1F\x7F]/g, " ")); } catch (_) {}
+  }
+
+  const results: any[] = [];
+  const objRe = /\{[^{}]{1,4000}\}/gs;
+  let m: RegExpExecArray | null;
+  while ((m = objRe.exec(raw)) !== null) {
+    try {
+      const parsed = JSON.parse(m[0]);
+      if (typeof parsed.sentence === "string" && typeof parsed.isClaim === "boolean") {
+        results.push(parsed); continue;
+      }
+    } catch (_) {}
+    const sentM  = m[0].match(/"sentence"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const claimM = m[0].match(/"isClaim"\s*:\s*(true|false)/);
+    if (sentM && claimM)
+      results.push({ sentence: sentM[1].replace(/\\"/g, '"'), isClaim: claimM[1] === "true" });
+  }
+  return results.length > 0 ? results : null;
 }
 
-export function markClaims(responseText: string, _domain?: string): MarkedSentence[] {
-  const sentences = splitIntoSentences(responseText);
-  if (process.env.DEBUG === "1")
-    console.log(`[Veriphy] Step 1: rule-based claim detection over ${sentences.length} sentences`);
-  return sentences.map(sentence => ({ sentence, isClaim: isClaimRuleBased(sentence) }));
+// ── Step 1: LLM-based claim detection ───────────────────────────────────────
+
+const MAX_MARK_CHARS = 5000;
+
+function truncateToSentenceBoundary(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const cut = text.slice(0, maxChars);
+  const lastBoundary = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "), cut.lastIndexOf("\n"));
+  return lastBoundary > maxChars * 0.5 ? cut.slice(0, lastBoundary + 1) : cut;
+}
+
+export async function markClaims(responseText: string, _domain?: string): Promise<MarkedSentence[]> {
+  const text = truncateToSentenceBoundary(responseText, MAX_MARK_CHARS);
+  if (text.length < responseText.length && process.env.DEBUG === "1")
+    console.log(`[Veriphy] Input truncated ${responseText.length} → ${text.length} chars for claim marking`);
+
+  const prompt = `You are Veriphy — an AI claim identification agent.
+
+Read the text below sentence by sentence. For each sentence decide: CLAIM or NOT A CLAIM.
+
+CLAIM: A sentence asserting a specific, verifiable fact — how a named technique, algorithm, or system works; an established scientific finding; a measurable property; or a relationship supported by literature.
+Examples:
+- "Arithmetic coding approaches the theoretical entropy limit for data compression." → CLAIM
+- "Shannon entropy measures the average uncertainty in a probability distribution." → CLAIM
+- "Neurons in the hippocampus play a key role in spatial memory formation." → CLAIM
+
+NOT A CLAIM: Transition phrases, rhetorical questions, greetings, list or table headers, computed numerical results, personal opinions, meta-commentary about the response, or vague encouragements.
+Examples:
+- "Here is a breakdown of how this works." → NOT A CLAIM
+- "Let me explain this step by step." → NOT A CLAIM
+- "The result is 2.3 bits." → NOT A CLAIM (a computed value, not a verifiable assertion)
+- "That's a great question!" → NOT A CLAIM
+- "In summary..." → NOT A CLAIM
+
+RULES:
+- Return ONLY a valid JSON array. No markdown, no preamble.
+- Plain ASCII only. Fields: sentence (string), isClaim (boolean). No other fields.
+- Every input sentence appears exactly once.
+
+[{"sentence":"...", "isClaim": true}, ...]
+
+Text:
+${text}`;
+
+  const raw    = await llm([{ role: "system", content: prompt }, { role: "user", content: "Return the JSON array now." }]);
+  if (process.env.DEBUG === "1") console.log("[markClaims] raw LLM output (first 600 chars):", raw.slice(0, 600));
+  const parsed = parseJsonArray(raw);
+  if (process.env.DEBUG === "1" && !parsed) console.log("[markClaims] parseJsonArray returned null — full raw:\n", raw);
+  return Array.isArray(parsed) ? (parsed as MarkedSentence[]) : [];
 }
 
 // ── Step 2: Shortlist diverse claims (Jaccard deduplication) ─────────────────
@@ -104,7 +184,6 @@ async function searchArxiv(claim: string): Promise<string | null> {
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const xml = await res.text();
-
     if (!xml.includes("<entry>")) return null;
 
     const titleMatch     = xml.match(/<entry>[\s\S]*?<title>([\s\S]*?)<\/title>/);
