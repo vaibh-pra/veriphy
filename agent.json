@@ -1,44 +1,31 @@
 {
-  "name": "veriphy-agent",
+  "name": "veriphy",
   "version": "1.1.0",
   "displayName": "Veriphy",
-  "description": "A three-step agent that post-processes any LLM response to identify verifiable factual claims, shortlist the 3 most distinctive ones (using Jaccard similarity deduplication), and retrieve real arXiv paper citations for each. Works with any topic \u2014 no domain configuration needed.",
+  "description": "A three-step agent that reads any LLM response, identifies factual claims, and finds real arXiv papers to back them up. Works with any topic and any LLM.",
   "author": "Automorph",
   "license": "MIT",
   "category": "research",
-  "tags": [
-    "claim-verification",
-    "citations",
-    "arXiv",
-    "fact-checking",
-    "LLM",
-    "research"
-  ],
+  "tags": ["veriphy", "claim-verification", "citations", "arXiv", "fact-checking", "LLM", "research"],
   "runtime": "node>=18",
-  "entrypoint": "server.ts",
+  "entrypoint": "proxy.ts",
   "capabilities": [
     {
       "id": "mark-claims",
       "name": "Mark Claims",
-      "description": "Reads every sentence in an LLM response and labels each as a verifiable factual claim or not. Transition phrases, computed results, opinions, and meta-commentary are never marked.",
+      "description": "Reads every sentence in an LLM response and labels each as a verifiable factual claim or not.",
       "endpoint": "POST /api/mark-claims",
       "input": {
-        "responseText": {
-          "type": "string",
-          "required": true,
-          "description": "Full LLM response text to analyse"
-        }
+        "responseText": { "type": "string", "required": true, "description": "Full LLM response text to analyse" },
+        "query":        { "type": "string", "required": false, "description": "The original user question — helps focus claim detection on the most relevant sentences" },
+        "domain":       { "type": "string", "required": false, "description": "Topic domain hint (default: general)" }
       },
       "output": {
         "marked": {
           "type": "array",
           "items": {
-            "sentence": {
-              "type": "string"
-            },
-            "isClaim": {
-              "type": "boolean"
-            }
+            "sentence": { "type": "string" },
+            "isClaim":  { "type": "boolean" }
           }
         }
       }
@@ -46,37 +33,31 @@
     {
       "id": "find-citations",
       "name": "Find Citations",
-      "description": "Receives pre-selected claims and queries arXiv for a real paper matching each. No LLM key required for this step. Claims with no arXiv result are de-marked.",
+      "description": "Takes a list of claims and searches arXiv for real papers to support each one. No LLM needed. Up to 4 papers are returned per claim, oldest first. Claims with no match are left uncited.",
       "endpoint": "POST /api/find-citations",
       "input": {
         "marked": {
           "type": "array",
           "required": true,
-          "description": "Output of mark-claims, optionally filtered to 3 shortlisted candidates",
+          "description": "Output of mark-claims, optionally filtered to shortlisted candidates",
           "items": {
-            "sentence": {
-              "type": "string"
-            },
-            "isClaim": {
-              "type": "boolean"
-            }
+            "sentence": { "type": "string" },
+            "isClaim":  { "type": "boolean" }
           }
-        }
+        },
+        "query":  { "type": "string", "required": false, "description": "Original user question — anchors every arXiv search to the right topic" },
+        "domain": { "type": "string", "required": false }
       },
       "output": {
         "cited": {
           "type": "array",
           "items": {
-            "sentence": {
-              "type": "string"
-            },
-            "isClaim": {
-              "type": "boolean"
-            },
-            "citation": {
-              "type": "string",
-              "nullable": true,
-              "description": "Author et al., Title, arXiv:ID, Year \u2014 null if no paper found"
+            "sentence":  { "type": "string" },
+            "isClaim":   { "type": "boolean" },
+            "citations": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Up to 4 arXiv references (Author, Title, arXiv:ID, Year). Empty if no paper was found."
             }
           }
         }
@@ -84,25 +65,22 @@
     }
   ],
   "environment": [
-    {
-      "name": "OLLAMA_API_KEY",
-      "required": true,
-      "description": "API key for Nemotron (Step 1 claim identification only)"
-    },
-    {
-      "name": "PORT",
-      "required": false,
-      "default": "4000",
-      "description": "Port the standalone agent server listens on"
-    }
+    { "name": "OLLAMA_API_KEY",    "required": true,  "description": "API key for the AI model used in Step 1 (claim detection)" },
+    { "name": "OLLAMA_BASE_URL",   "required": false, "default": "http://localhost:11434/v1", "description": "Base URL of the AI model endpoint used in Step 1" },
+    { "name": "OLLAMA_MODEL",      "required": false, "default": "nemotron-3-super:cloud",    "description": "Which AI model Step 1 uses" },
+    { "name": "PROXY_PORT",        "required": false, "default": "4001", "description": "Port the proxy server listens on" },
+    { "name": "REAL_LLM_BASE_URL", "required": false, "default": "http://localhost:11434", "description": "Where the proxy forwards your LLM requests" },
+    { "name": "REAL_LLM_API_KEY",  "required": false, "description": "Key to forward to the upstream LLM (leave blank for local Ollama)" },
+    { "name": "DEFAULT_DOMAIN",    "required": false, "default": "general", "description": "Topic domain passed to Step 1" },
+    { "name": "DEBUG",             "required": false, "description": "Set to 1 to print detailed logs to the terminal" }
   ],
   "integration": {
-    "dropInScript": "/client.js",
-    "usage": "new VerificationAgent({ container: el, apiBase: 'https://your-agent-url' })",
+    "dropInScript": "/agent.js",
+    "usage": "new VerificationAgent({ container: el, query: 'your question', apiBase: 'https://your-veriphy-url' })",
     "steps": [
-      "1. agent.run(responseText)  \u2014 Step 1: mark claims (LLM)",
-      "2. agent.shortlist()        \u2014 Step 2: client-side, pick top 3 diverse claims",
-      "3. agent.cite()             \u2014 Step 3: arXiv lookup, no LLM needed"
+      "1. agent.run(responseText)  — Step 1: mark claims (uses AI)",
+      "2. agent.shortlist()        — Step 2: pick the most relevant, distinct claims (no AI)",
+      "3. agent.cite()             — Step 3: find arXiv papers for each claim (no AI)"
     ]
   },
   "health": "GET /health"
