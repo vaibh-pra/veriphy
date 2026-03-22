@@ -281,33 +281,41 @@
   VerificationAgent.prototype._renderStep3 = function (cited) {
     const id = this._id;
 
-    /* Build deduplication map: citation string → 1-based reference number.
-       If two claims share the exact same citation, they get the same [N]. */
+    /* Build global deduplication map: citation string → 1-based reference number.
+       Shared citations across claims get the same [N]. */
     const citMap = new Map(); // citation → refNum
-    const refs   = [];        // unique citations in order of first appearance
+    const refs   = [];        // unique citations in first-appearance order
     for (const m of cited) {
-      if (m.isClaim && m.citation && !citMap.has(m.citation)) {
-        refs.push(m.citation);
-        citMap.set(m.citation, refs.length);
+      const cits = Array.isArray(m.citations) ? m.citations : (m.citation ? [m.citation] : []);
+      for (const c of cits) {
+        if (!citMap.has(c)) {
+          refs.push(c);
+          citMap.set(c, refs.length);
+        }
       }
     }
 
-    let html         = '<div class="va-wrap">';
-    let claimCount   = 0;
+    let html       = '<div class="va-wrap">';
+    let claimCount = 0;
 
     for (const m of cited) {
-      const s = this._esc(this._clean(m.sentence));
-      if (m.isClaim && m.citation) {
+      const s    = this._esc(this._clean(m.sentence));
+      const cits = Array.isArray(m.citations) ? m.citations : (m.citation ? [m.citation] : []);
+      if (m.isClaim && cits.length > 0) {
         claimCount++;
-        const num   = citMap.get(m.citation);
-        const srcId = `${id}-src${num}`;
-        html += `<span class="va-claim">${s}<strong class="va-cite-num"
-          onclick="(function(){
-            var el=document.getElementById('${srcId}');
-            el.scrollIntoView({behavior:'smooth',block:'nearest'});
-            el.classList.add('va-src-flash');
-            setTimeout(function(){el.classList.remove('va-src-flash');},1200);
-          })()">[${num}]</strong></span> `;
+        // Build one bold [N] badge per citation, all clickable
+        const badges = cits.map(c => {
+          const num   = citMap.get(c);
+          const srcId = `${id}-src${num}`;
+          return `<strong class="va-cite-num"
+            onclick="(function(){
+              var el=document.getElementById('${srcId}');
+              el.scrollIntoView({behavior:'smooth',block:'nearest'});
+              el.classList.add('va-src-flash');
+              setTimeout(function(){el.classList.remove('va-src-flash');},1200);
+            })()">[${num}]</strong>`;
+        }).join('');
+        html += `<span class="va-claim">${s}${badges}</span> `;
       } else {
         html += `<span>${s}</span> `;
       }
