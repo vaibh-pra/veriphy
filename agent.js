@@ -220,7 +220,7 @@
     if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Finding citations…'; }
     const toSend = this._shortlisted || this._marked;
     try {
-      const res  = await this._post('/api/find-citations', { marked: toSend, domain: this._domain });
+      const res  = await this._post('/api/find-citations', { marked: toSend, domain: this._domain, query: this._query });
       const data = await res.json();
       if (data.cited && data.cited.length) {
         this._renderStep3(data.cited);
