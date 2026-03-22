@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Veriphy",
+  "version": "1.0.0",
+  "description": "Paste any AI response, get it back with real arXiv citations on every factual claim.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "permissions": ["storage"],
+  "host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"]
+}
