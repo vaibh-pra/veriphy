@@ -144,6 +144,7 @@
 
   /* Public: call with the chatbot response text */
   VerificationAgent.prototype.run = async function (responseText) {
+    this._startTime = Date.now();
     const cleanText = this._clean(responseText);
     this._raw = cleanText;
     this._render(`<span class="va-spinner"></span>Marking claims…`);
@@ -303,8 +304,10 @@
       html += `</div>`;
     }
 
+    const elapsed = this._startTime ? ((Date.now() - this._startTime) / 1000).toFixed(1) + 's' : '';
     html += `<div class="va-footer">
       <span>📌 ${claimCount} claim${claimCount !== 1 ? 's' : ''} cited &mdash; ${refs.length} unique source${refs.length !== 1 ? 's' : ''}</span>
+      ${elapsed ? `<span>⏱ ${elapsed}</span>` : ''}
     </div></div>`;
 
     this._el.innerHTML = html;
