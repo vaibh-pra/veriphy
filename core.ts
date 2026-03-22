@@ -181,18 +181,75 @@ export function shortlistClaims(marked: MarkedSentence[], maxClaims = 5, similar
 // ── Step 3: arXiv citation lookup ────────────────────────────────────────────
 
 const ARXIV_STOP_WORDS = new Set([
-  "a","an","the","is","are","was","were","be","been","being","have","has","had",
-  "do","does","did","will","would","could","should","may","might","must","can",
-  "this","that","these","those","of","in","to","for","on","at","by","with",
-  "from","and","or","but","not","as","it","its","also","which","than","more",
-  "most","such","each","both","they","their","thus","hence","via","per","when",
-  "where","how","all","any","some","one","two","three","often","very","well",
+  // articles / prepositions / conjunctions
+  "a","an","the","of","in","to","for","on","at","by","with","from","and","or","but",
+  "not","as","it","its","so","yet","nor","either","neither","both","whether",
+  // auxiliary / modal verbs
+  "is","are","was","were","be","been","being","have","has","had","do","does","did",
+  "will","would","could","should","may","might","must","can","shall",
+  // pronouns / determiners
+  "this","that","these","those","they","their","he","she","we","you","i","me","us",
+  "him","her","his","our","your","its","which","who","whom","what","whose",
+  // common adverbs / connectives
+  "also","than","more","most","such","each","thus","hence","via","per","when","where",
+  "how","all","any","some","very","well","just","even","only","simply","often","rather",
+  "while","if","then","else","however","therefore","moreover","furthermore","additionally",
+  "typically","generally","specifically","essentially","particularly","effectively",
+  // generic explanation verbs (all LLM prose)
   "show","shows","shown","use","used","uses","using","based","approach","method",
   "result","results","work","works","paper","study","propose","provides","achieve",
+  "encode","decode","represent","assign","output","begin","start","end","finish",
+  "continue","remain","remain","become","get","make","take","give","put","let","see",
+  "say","know","think","want","need","create","add","remove","move","run","call",
+  "return","narrow","focus","require","ensure","allow","perform","define","describe",
+  "reduce","increase","improve","maintain","handle","produce","compute","calculate",
+  "apply","select","choose","determine","indicate","demonstrate","illustrate","explain",
+  "consider","assume","expect","lead","leads","leads","zoom","zooms","zooming","means",
+  "mean","meant","define","defined","defines","known","given","certain","provided",
+  "force","forces","forced","fit","fits","fitted","occupy","occupies","occupied",
+  "represent","represented","represents","split","splits","splitting","subdivide",
+  "subdivides","narrows","zooms","fills","fills","outputs","inputs","treats","treating",
+  // ordinals / sequence words
+  "first","second","third","fourth","fifth","sixth","seventh","eighth","ninth","tenth",
+  "last","next","previous","final","initial","current","new","entire","single","overall",
+  // generic nouns in LLM explanations (too broad to be useful search terms)
+  "example","step","steps","part","parts","point","points","case","cases","form","forms",
+  "type","types","kind","kinds","way","ways","number","numbers","bit","bits","byte","bytes",
+  "value","values","set","sets","size","level","levels","degree","rate","range","limit",
+  "interval","symbol","symbols","code","codes","word","words","letter","letters",
+  "data","file","files","message","messages","sequence","sequences","process","processes",
+  "key","main","idea","concept","goal","task","rule","rules","term","terms","note","notes",
+  // common adjectives too generic for search
+  "specific","different","similar","equal","other","high","low","large","small","long",
+  "short","wide","deep","fast","slow","simple","complex","easy","hard","same","real",
+  "actual","entire","single","certain","known","given","possible","necessary","important",
+  "significant","common","typical","standard","basic","general","original","special",
+  "dominant","mathematical","theoretical","practical","modern","early","late","total",
+  // example-specific junk
+  "abba","lookup","table","half","upper","lower","halves","roughly","approximately",
+  "versus","despite","unlike","beyond","inside","outside","within","without","across",
+  "between","among","around","throughout","whether","although","since","because",
 ]);
 
+// Words to strip from the user query when extracting the topic anchor
+const QUERY_STOP_WORDS = new Set([
+  ...ARXIV_STOP_WORDS,
+  "explain","what","how","does","why","when","can","tell","about","describe","define",
+  "give","please","show","understand","learn","help","write","find","list","summarize",
+  "analyze","discuss","compare","contrast","elaborate","expand","cover","elaborate",
+  "me","my","an","brief","overview","introduction","summary","detail","details",
+]);
+
+// Extract 2-3 topic terms from the user's query to anchor every arXiv search
+function extractTopicAnchor(query: string): string {
+  if (!query) return "";
+  const words = (query.toLowerCase().match(/\b[a-z][a-z0-9]{1,}\b/g) || [])
+    .filter(w => !QUERY_STOP_WORDS.has(w) && w.length > 2);
+  return words.slice(0, 3).join(" ");
+}
+
 // Build a quoted phrase query from the claim using n-gram extraction
-function buildArxivQuery(claim: string): { primary: string; fallback: string } {
+function buildArxivQuery(claim: string, topicAnchor?: string): { primary: string; fallback: string } {
   const words = (claim.toLowerCase().match(/\b[a-z][a-z0-9]{1,}\b/g) || []);
   const isKey = (w: string) => !ARXIV_STOP_WORDS.has(w) && w.length > 2;
 
@@ -236,14 +293,21 @@ function buildArxivQuery(claim: string): { primary: string; fallback: string } {
 
   const singles = words.filter(isKey);
 
+  // Anchor prefix: forces every result to mention the topic from the user's query
+  const anchorPhrase = topicAnchor ? `"${topicAnchor}" AND ` : "";
+  const anchorKw     = topicAnchor ? `${topicAnchor} ` : "";
+
   if (selected.length === 0) {
     const kw = singles.slice(0, 6).join(" ");
-    return { primary: `all:${kw}`, fallback: `ti:${singles.slice(0, 4).join(" ")}` };
+    return {
+      primary:  `all:${anchorKw}${kw}`,
+      fallback: `ti:${anchorKw}${singles.slice(0, 4).join(" ")}`,
+    };
   }
 
   const quoted   = selected.map(p => `"${p.text}"`).join(" AND ");
-  const primary  = `abs:${quoted}`;
-  const fallback = `all:${singles.slice(0, 6).join(" ")}`;
+  const primary  = `abs:${anchorPhrase}${quoted}`;
+  const fallback = `all:${anchorKw}${singles.slice(0, 6).join(" ")}`;
   return { primary, fallback };
 }
 
@@ -267,7 +331,7 @@ function parseArxivEntry(entryXml: string): string | null {
 
 async function runArxivQuery(query: string, maxResults = 4): Promise<string[]> {
   try {
-    // Fetch 3x more by relevance so we have candidates to reorder
+    // Fetch 3× more by relevance so we have candidates to reorder
     const fetchCount = maxResults * 3;
     const url = `https://export.arxiv.org/api/query?search_query=${encodeURIComponent(query)}&max_results=${fetchCount}&sortBy=relevance`;
     if (process.env.DEBUG === "1") console.log("[arXiv] query:", query);
@@ -299,19 +363,20 @@ async function runArxivQuery(query: string, maxResults = 4): Promise<string[]> {
   }
 }
 
-async function searchArxiv(claim: string, maxResults = 4): Promise<string[]> {
-  const { primary, fallback } = buildArxivQuery(claim);
+async function searchArxiv(claim: string, maxResults = 4, topicAnchor?: string): Promise<string[]> {
+  const { primary, fallback } = buildArxivQuery(claim, topicAnchor);
   // Try precise phrase query first; if fewer than wanted, fall back to keywords
   const results = await runArxivQuery(primary, maxResults);
   if (results.length > 0) return results;
   return runArxivQuery(fallback, maxResults);
 }
 
-export async function findCitations(marked: MarkedSentence[], _domain?: string): Promise<CitedSentence[]> {
+export async function findCitations(marked: MarkedSentence[], _domain?: string, query?: string): Promise<CitedSentence[]> {
+  const topicAnchor = query ? extractTopicAnchor(query) : undefined;
   const claims = marked.filter(m => m.isClaim);
   if (!claims.length) return marked.map(m => ({ ...m, citations: [] }));
 
-  const results = await Promise.all(claims.map(m => searchArxiv(m.sentence, 4)));
+  const results = await Promise.all(claims.map(m => searchArxiv(m.sentence, 4, topicAnchor)));
 
   let idx = 0;
   return marked.map(m => {
