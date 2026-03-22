@@ -44,9 +44,10 @@ Step 3  findCitations()    Queries the arXiv API — no LLM, no API key.
                            Extracts scored n-gram phrases from each claim,
                            builds a quoted phrase query targeting the abs:
                            field (e.g. abs:"quantum arithmetic coding" AND
-                           "von neumann entropy"), fetches up to 4 results
-                           per claim, and falls back to a broad keyword
-                           search if the phrase query returns nothing.
+                           "von neumann entropy"), fetches up to 4 results per claim sorted by
+                           submission date ascending (oldest first), and
+                           falls back to a broad keyword search if the
+                           phrase query returns nothing.
                            All claim searches run in parallel.
                            Claims with no arXiv match are de-marked.
 ```
@@ -205,7 +206,8 @@ abs:"quantum arithmetic coding" AND "von neumann entropy bound" AND "non uniform
 2. Each phrase is scored by the number of non-stop-word tokens it contains.
 3. The top 3 highest-scoring, non-overlapping phrases are selected. Two phrases overlap if they share a consecutive word pair.
 4. The query targets the `abs:` field (abstract) for precision, with automatic fallback to a broad `all:` keyword search if the phrase query returns no results.
-5. Up to 4 papers are returned per claim in a single arXiv API call.
+5. Results are sorted by submission date **ascending** — oldest matching papers appear first.
+6. Up to 4 papers are returned per claim in a single arXiv API call.
 
 ---
 
@@ -219,6 +221,9 @@ Ranking by sentence length (the naive approach) often promotes the longest sente
 
 **Why quoted phrases instead of bag-of-words arXiv queries?**
 Bag-of-words queries like `all:quantum arithmetic coding` match any paper containing those three words anywhere — often returning unrelated results. Quoted phrases like `"quantum arithmetic coding"` require the words to appear adjacent, dramatically improving precision.
+
+**Why sort by oldest date first?**
+For well-established topics (compression, graph theory, cryptography), the seminal papers from the 1990s–2000s are more appropriate citations than last month's preprint. Sorting ascending surfaces foundational work while still respecting the relevance of the phrase query that filtered the candidates.
 
 **Why arXiv instead of an LLM for citations?**
 LLMs hallucinate citations — fabricated titles, wrong years, non-existent venues. arXiv returns real papers with real IDs that can be independently verified. If arXiv has no result for a claim, the claim is de-marked rather than cited with a hallucination.
