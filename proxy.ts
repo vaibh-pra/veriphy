@@ -64,16 +64,18 @@ function inlineCitations(cited: Awaited<ReturnType<typeof findCitations>>): stri
   const refs: string[] = [];               // unique citations in order
 
   const lines = cited.map(s => {
-    if (s.isClaim && s.citation) {
-      let num: number;
-      if (citMap.has(s.citation)) {
-        num = citMap.get(s.citation)!;
-      } else {
-        refs.push(s.citation);
-        num = refs.length;
-        citMap.set(s.citation, num);
-      }
-      return `${s.sentence} [${num}]`;
+    const cits: string[] = Array.isArray((s as any).citations)
+      ? (s as any).citations
+      : (s.citation ? [s.citation] : []);
+    if (s.isClaim && cits.length > 0) {
+      const nums = cits.map(c => {
+        if (citMap.has(c)) return citMap.get(c)!;
+        refs.push(c);
+        const num = refs.length;
+        citMap.set(c, num);
+        return num;
+      });
+      return `${s.sentence} ${nums.map(n => `[${n}]`).join('')}`;
     }
     return s.sentence;
   });
@@ -107,10 +109,10 @@ async function runVeriphy(text: string, domain: string): Promise<string> {
 
   console.log("[Veriphy] Step 3: finding citations...");
   const cited    = await findCitations(shortlisted, domain);
-  const citCount = cited.filter(c => c.isClaim && c.citation).length;
+  const citCount = cited.filter(c => c.isClaim && ((c as any).citations?.length || c.citation)).length;
 
   // Count unique citations
-  const uniqueCitations = new Set(cited.filter(c => c.citation).map(c => c.citation));
+  const uniqueCitations = new Set(cited.flatMap(c => (c as any).citations?.length ? (c as any).citations : c.citation ? [c.citation] : []));
   console.log(`[Veriphy] Step 3 done: ${citCount} claim(s) cited, ${uniqueCitations.size} unique source(s)`);
 
   if (DEBUG) {
