@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 420px;
+      font-family: system-ui, sans-serif;
+      font-size: 13px;
+      color: #111;
+      background: #fff;
+      padding: 14px;
+    }
+    h1 { font-size: 15px; font-weight: 700; margin-bottom: 12px; letter-spacing: -0.3px; }
+    label { display: block; font-weight: 600; margin-bottom: 4px; }
+    textarea, input[type=text] {
+      width: 100%;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 12px;
+      font-family: inherit;
+      resize: vertical;
+    }
+    textarea { height: 120px; }
+    input[type=text] { height: 32px; }
+    .row { margin-bottom: 10px; }
+    button {
+      width: 100%;
+      background: #1a1a1a;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 9px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+    button:disabled { background: #999; cursor: default; }
+    #status { font-size: 11px; color: #555; margin-bottom: 8px; min-height: 16px; }
+    #output {
+      width: 100%;
+      height: 180px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 11px;
+      font-family: monospace;
+      white-space: pre-wrap;
+      overflow-y: auto;
+      background: #f9f9f9;
+      display: none;
+    }
+    .settings-toggle {
+      font-size: 11px;
+      color: #888;
+      cursor: pointer;
+      text-decoration: underline;
+      margin-top: 8px;
+      display: inline-block;
+    }
+    #settings { margin-top: 8px; display: none; }
+    #settings label { font-weight: normal; color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Veriphy</h1>
+
+  <div class="row">
+    <label for="query">Your question <span style="font-weight:400;color:#888">(optional but recommended)</span></label>
+    <input type="text" id="query" placeholder="e.g. How does arithmetic coding work?" />
+  </div>
+
+  <div class="row">
+    <label for="response">AI response</label>
+    <textarea id="response" placeholder="Paste the AI response here…"></textarea>
+  </div>
+
+  <button id="verifyBtn">Verify</button>
+
+  <div id="status"></div>
+  <pre id="output"></pre>
+
+  <span class="settings-toggle" id="settingsToggle">⚙ API settings</span>
+  <div id="settings">
+    <div class="row" style="margin-top:6px">
+      <label for="apiBase">Backend URL</label>
+      <input type="text" id="apiBase" placeholder="https://your-veriphy-app.replit.app" />
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
