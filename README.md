@@ -2,7 +2,7 @@
 
 A standalone, three-step agent that post-processes any LLM response to identify factual claims, shortlist the most distinctive ones, and retrieve real arXiv paper citations for each.
 
-Built as part of the [Automorph](https://github.com/vaibh-pra/automorph-backend) project but designed to work with **any** LLM or chatbot on any topic.
+Built as part of the [Automorph](https://github.com/vaibh-pra/automorph-backend) project but designed to work with **any** LLM or chatbot on any topic, especially STEM related.
 
 ---
 
