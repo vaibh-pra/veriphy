@@ -134,6 +134,7 @@
                       : opts.container;
     this._api     = (opts.apiBase || '').replace(/\/$/, '');
     this._domain  = opts.domain || 'general';
+    this._query   = opts.query  || '';
     this._id      = 'va' + (_nextId++);
     this._marked  = null;
     this._shortlisted = null;
@@ -142,14 +143,20 @@
     injectCSS();
   }
 
+  /* Public: update the query context at any time before or after run() */
+  VerificationAgent.prototype.setQuery = function (query) {
+    this._query = query || '';
+  };
+
   /* Public: call with the chatbot response text */
-  VerificationAgent.prototype.run = async function (responseText) {
+  VerificationAgent.prototype.run = async function (responseText, query) {
+    if (query !== undefined) this._query = query;
     this._startTime = Date.now();
     const cleanText = this._clean(responseText);
     this._raw = cleanText;
     this._render(`<span class="va-spinner"></span>Marking claims…`);
     try {
-      const res  = await this._post('/api/mark-claims', { responseText: cleanText, domain: this._domain });
+      const res  = await this._post('/api/mark-claims', { responseText: cleanText, domain: this._domain, query: this._query });
       const data = await res.json();
       if (data.marked && data.marked.length) {
         this._marked = data.marked;
@@ -172,12 +179,23 @@
     return union === 0 ? 0 : intersection / union;
   }
 
-  /* Step 2 — client-side: pick up to 3 diverse claims.
-     Skips any candidate that is too similar (>55% word overlap)
-     to a claim already selected. */
+  /* Step 2 — client-side: pick up to 5 diverse claims ranked by query relevance.
+     If a query is available, prioritises sentences with highest word-overlap
+     with the original question. Otherwise falls back to sentence length. */
   VerificationAgent.prototype.shortlist = function () {
+    var queryWords = this._query
+      ? new Set((this._query.toLowerCase().match(/\w+/g) || []).filter(function(w){ return w.length > 2; }))
+      : null;
+
+    function relevanceScore(sentence) {
+      if (!queryWords || queryWords.size === 0) return sentence.length;
+      var words = (sentence.toLowerCase().match(/\w+/g) || []);
+      var overlap = words.filter(function(w){ return queryWords.has(w); }).length;
+      return overlap / Math.sqrt(queryWords.size);
+    }
+
     var candidates = this._marked.filter(m => m.isClaim)
-                       .sort((a, b) => b.sentence.length - a.sentence.length);
+                       .sort((a, b) => relevanceScore(b.sentence) - relevanceScore(a.sentence));
 
     var selected = [];
     for (var i = 0; i < candidates.length; i++) {
