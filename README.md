@@ -1,8 +1,8 @@
 # Veriphy
 
-A standalone, three-step agent that post-processes any LLM response to identify factual claims, shortlist the most distinctive ones, and retrieve real arXiv paper citations for each.
+A standalone, three-step agent that post-processes any LLM response to identify factual claims, shortlist the most important ones relative to the original query, and retrieve real arXiv citations — up to four per claim — without hallucinating.
 
-Built as part of the [Automorph](https://github.com/vaibh-pra/automorph-backend) project but designed to work with **any** LLM or chatbot on any topic, especially STEM related.
+Built as part of the [Automorph](https://github.com/vaibh-pra) project but designed to work with **any** LLM or chatbot on any topic, especially STEM related.
 
 ---
 
@@ -13,63 +13,76 @@ LLM responses mix two very different kinds of sentences:
 - **Factual claims** — assertions about how algorithms work, what techniques mean, established scientific findings. These *can* be wrong or hallucinated.
 - **Everything else** — transitions, rhetorical questions, computed results, opinions, meta-commentary. These need no verification.
 
-Veriphy identifies the first kind and traces each one back to a real arXiv paper.
+Veriphy identifies the first kind, ranks them by how closely they answer the original user question, and traces each one back to real arXiv papers.
 
 ---
 
 ## Three-Step Pipeline
 
 ```
-Step 1  markClaims()       LLM (Nemotron) reads every sentence and labels
-                           it CLAIM or NOT A CLAIM. Transitions, opinions,
-                           computed values, and filler are never marked.
-                           Requires: OLLAMA_API_KEY
+Step 1  markClaims()       LLM (Nemotron by default) reads every sentence and
+                           labels it CLAIM or NOT A CLAIM.
+                           If the original user query is provided, the prompt
+                           instructs the LLM to prioritise sentences that
+                           directly answer that question — so claim detection
+                           is query-aware, not purely structural.
+                           Transitions, opinions, computed values, and filler
+                           are never marked regardless of the query.
+                           Input is truncated to 5 000 chars before sending.
+                           Requires: OLLAMA_API_KEY (for cloud models)
 
-Step 2  shortlistClaims()  Client-side — no LLM, no API key.
-                           Picks up to 3 claims greedily by sentence length.
+Step 2  shortlistClaims()  No LLM, no API key.
+                           Picks up to 5 claims ranked by relevance to the
+                           original query (word-overlap score, normalised by
+                           query length). Falls back to sentence length when
+                           no query is provided.
                            Skips any candidate that shares >55% word overlap
                            with an already-selected claim (Jaccard filter),
                            so near-duplicate sentences are never both cited.
 
 Step 3  findCitations()    Queries the arXiv API — no LLM, no API key.
-                           Extracts key terms from each claim, searches
-                           arXiv, and returns the top-matching paper.
-                           All 3 searches run in parallel (<1 s typical).
-                           Claims with no arXiv result are de-marked.
+                           Extracts scored n-gram phrases from each claim,
+                           builds a quoted phrase query targeting the abs:
+                           field (e.g. abs:"quantum arithmetic coding" AND
+                           "von neumann entropy"), fetches up to 4 results
+                           per claim, and falls back to a broad keyword
+                           search if the phrase query returns nothing.
+                           All claim searches run in parallel.
+                           Claims with no arXiv match are de-marked.
 ```
 
 **Only Step 1 uses an LLM.** Steps 2 and 3 are entirely LLM-free.
-
-The output is the original response with up to 3 sentences annotated with arXiv citations. Every other sentence is left exactly as-is.
 
 ---
 
 ## Citation Rendering
 
-When two claims resolve to the same paper, they share the same `[N]` reference number and the source is listed only once:
+Each cited sentence receives one **[N]** marker per citation found. When a claim matches multiple papers, multiple markers appear inline. When two claims share the exact same paper, they share the same `[N]` number and the source is listed only once.
 
 ```
-Botnets use hierarchical overlays for resilience. [1]
-Mirai used a similar command-and-control topology. [1]   ← same paper, reused
+Quantum arithmetic coding must be reversible to obey unitarity. [1][2]
+Schumacher compression is the quantum analogue of Huffman coding. [3]
 
 Sources:
-[1] Antonakakis et al., "Understanding the Mirai Botnet", arXiv:1702.06771, 2017
+[1] Wilde et al., "Quantum Rate-Distortion Coding", arXiv:1108.4985, 2012
+[2] Chuang et al., "Quantum Computation and Quantum Information", arXiv:..., 2000
+[3] Schumacher, "Quantum Coding", arXiv:quant-ph/9604030, 1996
 ```
+
+In the browser widget, each `[N]` is rendered as bold green text and scrolls to the matching source entry when clicked.
 
 ---
 
 ## Repository Structure
 
 ```
-verifi-agent/
+veriphy/
   core.ts        All logic — three exported functions, no framework dependency
-  server.ts      Standalone API server (port 4000)
-  proxy.ts       Transparent LLM proxy (port 4001) — intercepts before terminal display
-  cli.ts         CLI tool — pipe any LLM output through Veriphy in the terminal
-  client.js      Drop-in frontend widget for any chatbot page (zero dependencies)
+  proxy.ts       Transparent LLM proxy (port 4001) — intercepts before display
+  agent.js       Drop-in frontend widget for any chatbot page (zero dependencies)
   agent.json     Marketplace manifest — capabilities, schemas, env requirements
   package.json   npm package definition
-  Dockerfile     Container definition
+  README.md      This file
 ```
 
 ---
@@ -78,7 +91,7 @@ verifi-agent/
 
 ### Mode 1 — Proxy (transparent interception)
 
-The proxy sits between you and Ollama or any cloud LLM. Every response is verified **before it reaches your terminal**. You do not change how you use your LLM.
+The proxy sits between you and Ollama or any cloud LLM. Every response is verified before it reaches your terminal or application. You do not change how you use your LLM.
 
 ```bash
 # 1. Start the proxy
@@ -90,7 +103,7 @@ OLLAMA_API_KEY=your_key npm run proxy
 export OLLAMA_HOST=http://localhost:4001
 
 # 3. Use your LLM as normal — responses are verified automatically
-ollama run llama3 "Explain arithmetic coding"
+ollama run llama3 "Explain quantum arithmetic coding"
 ```
 
 **Forwarding to a cloud LLM** (OpenAI, Anthropic, etc.):
@@ -102,73 +115,60 @@ OLLAMA_API_KEY=your_nemotron_key \
 npm run proxy
 ```
 
-Note: `OLLAMA_API_KEY` is used **only** for Veriphy's internal Nemotron calls (Step 1).
-`REAL_LLM_API_KEY` is forwarded to the upstream LLM and is optional for local Ollama.
-
-**Override domain hint per request:**
-
-```bash
-curl -X POST http://localhost:4001/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "x-verifi-domain: cybersecurity" \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Explain botnets"}]}'
-```
-
-**Enable verbose logging:**
-
-```bash
-DEBUG=1 OLLAMA_API_KEY=your_key npm run proxy
-# Shows:
-# [Veriphy] Step 1: marking claims (chars=4209)
-# [Veriphy] Step 1 done: 55 sentences, 24 claims
-# [arXiv] query: arithmetic coding huffman compression efficiency
-# [arXiv] found: Hashimoto et al. (2022) arXiv:2209.08874v1
-# [Veriphy] Step 3 done: 3 claim(s) cited, 3 unique source(s)
-```
+Note: `OLLAMA_API_KEY` is used **only** for Veriphy's internal Nemotron calls in Step 1. It is not forwarded to the upstream LLM unless you also set `REAL_LLM_API_KEY`.
 
 ---
 
-### Mode 2 — CLI
+### Mode 2 — Browser Widget
 
-```bash
-# Pipe any LLM output through Veriphy
-ollama run llama3 "Explain Shannon entropy" | npx tsx cli.ts
+Drop `agent.js` into any page that has a chatbot. The widget calls your backend's `/api/mark-claims` and `/api/find-citations` endpoints, renders verified text in-place, and shows a latency counter when Step 3 completes.
+
+```html
+<script src="/agent.js"></script>
+<script>
+  const agent = new VerificationAgent({
+    container: document.getElementById('response-div'),
+    apiBase:   'https://your-backend.com',  // optional, defaults to same origin
+    domain:    'general',                   // optional
+    query:     'How does quantum arithmetic coding work?', // optional but recommended
+  });
+
+  // After your chatbot produces a response:
+  agent.run(responseText);
+
+  // Or pass the query at run time:
+  agent.run(responseText, 'How does quantum arithmetic coding work?');
+
+  // Or update the query separately before running:
+  agent.setQuery('How does quantum arithmetic coding work?');
+  agent.run(responseText);
+</script>
 ```
+
+The widget automatically strips markdown symbols (`**`, `##`, tables, LaTeX `$...$`, original `[N]` markers) from the response text before sending it to the backend, so the LLM sees clean prose rather than formatting noise.
+
+The three pipeline steps are user-triggered inside the widget:
+
+| Button | Action |
+|---|---|
+| Step 2: Shortlist → | Picks the 5 most query-relevant, diverse claims |
+| Step 3: Cite Claims → | Fetches up to 4 arXiv citations per claim |
 
 ---
 
-### Mode 3 — API server
+### Mode 3 — Direct API (TypeScript / Node.js)
 
-```bash
-npm start
-# Listening on port 4000
-
-# Step 1: mark claims
-curl -X POST http://localhost:4000/api/mark-claims \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Arithmetic coding is a lossless compression method..."}'
-
-# Step 3: find citations (arXiv — no LLM key needed for this step)
-curl -X POST http://localhost:4000/api/find-citations \
-  -H "Content-Type: application/json" \
-  -d '{"marked":[...]}'
-```
-
----
-
-## Embed in Your Own Node.js Server
-
-```ts
+```typescript
 import { markClaims, shortlistClaims, findCitations } from './core';
 
-// Step 1 — requires OLLAMA_API_KEY
-const marked      = await markClaims(responseText);
+const query     = 'How does quantum arithmetic coding work?';
+const marked    = await markClaims(responseText, 'general', query);
+const shortlist = shortlistClaims(marked, 5, 0.55, query);
+const cited     = await findCitations(shortlist);
 
-// Step 2 — pure function, no I/O
-const shortlisted = shortlistClaims(marked);
-
-// Step 3 — queries arXiv, no LLM key needed
-const cited       = await findCitations(shortlisted);
+// cited[i].sentence   — sentence text
+// cited[i].isClaim    — true if at least one citation was found
+// cited[i].citations  — string[] of up to 4 arXiv reference strings
 ```
 
 ---
@@ -177,22 +177,48 @@ const cited       = await findCitations(shortlisted);
 
 | Variable | Required | Description |
 |---|---|---|
-| `OLLAMA_API_KEY` | Yes | API key for Nemotron (Step 1 only) |
-| `PORT` | No (default: 4000) | Port for the standalone API server |
-| `PROXY_PORT` | No (default: 4001) | Port for the proxy server |
-| `REAL_LLM_BASE_URL` | Proxy only | Upstream LLM base URL (default: `http://localhost:11434`) |
-| `REAL_LLM_API_KEY` | No | Auth key forwarded to the upstream LLM (omit for local Ollama) |
-| `DEBUG` | No | Set to `1` to log raw LLM output and arXiv queries to the console |
+| `OLLAMA_API_KEY` | Yes (for cloud models) | API key for the Step 1 LLM. Not needed for local Ollama with open-weight models. |
+| `OLLAMA_BASE_URL` | No (default: `http://localhost:11434/v1`) | Base URL of the LLM endpoint used by Step 1. |
+| `OLLAMA_MODEL` | No (default: `nemotron-3-super:cloud`) | Model used by Step 1. Any Ollama-compatible model works. |
+| `PROXY_PORT` | No (default: `4001`) | Port the proxy listens on. |
+| `REAL_LLM_BASE_URL` | Proxy only | Upstream LLM base URL (default: `http://localhost:11434`). |
+| `REAL_LLM_API_KEY` | No | Auth key forwarded to the upstream LLM. Omit for local Ollama. |
+| `DEFAULT_DOMAIN` | No (default: `general`) | Domain hint passed to Step 1. |
+| `DEBUG` | No | Set to `1` to log raw LLM output and arXiv queries to the console. |
+
+---
+
+## arXiv Query Strategy
+
+Step 3 builds quoted phrase queries rather than plain keyword bags. For a claim like:
+
+> "Quantum Arithmetic Coding achieves the von Neumann entropy bound for non-uniform quantum sources."
+
+The query becomes:
+
+```
+abs:"quantum arithmetic coding" AND "von neumann entropy bound" AND "non uniform quantum"
+```
+
+**How phrases are selected:**
+1. All trigrams and bigrams are extracted from the claim (stop-words removed).
+2. Each phrase is scored by the number of non-stop-word tokens it contains.
+3. The top 3 highest-scoring, non-overlapping phrases are selected. Two phrases overlap if they share a consecutive word pair.
+4. The query targets the `abs:` field (abstract) for precision, with automatic fallback to a broad `all:` keyword search if the phrase query returns no results.
+5. Up to 4 papers are returned per claim in a single arXiv API call.
 
 ---
 
 ## Design Decisions
 
-**Why shortlist only 3 claims?**
-All 3 arXiv searches run in parallel, so latency is bounded by the slowest single request — typically under a second. Three is enough to meaningfully annotate a response without overwhelming the reader.
+**Why up to 5 shortlisted claims?**
+Five claims give broader coverage of the response while remaining readable. All arXiv lookups run in parallel so latency scales with the slowest single request, not with the count.
 
-**Why the Jaccard similarity filter in Step 2?**
-Without it, an LLM that says the same thing in two slightly different sentences would fill both citation slots with near-identical content. The filter (>55% word overlap = skip) ensures the 3 cited claims are genuinely distinct.
+**Why query-aware shortlisting?**
+Ranking by sentence length (the naive approach) often promotes the longest sentence regardless of whether it answers the user's question. Ranking by word-overlap with the original query surfaces the claims most directly relevant to what was actually asked.
+
+**Why quoted phrases instead of bag-of-words arXiv queries?**
+Bag-of-words queries like `all:quantum arithmetic coding` match any paper containing those three words anywhere — often returning unrelated results. Quoted phrases like `"quantum arithmetic coding"` require the words to appear adjacent, dramatically improving precision.
 
 **Why arXiv instead of an LLM for citations?**
 LLMs hallucinate citations — fabricated titles, wrong years, non-existent venues. arXiv returns real papers with real IDs that can be independently verified. If arXiv has no result for a claim, the claim is de-marked rather than cited with a hallucination.
@@ -200,17 +226,17 @@ LLMs hallucinate citations — fabricated titles, wrong years, non-existent venu
 **Why de-mark claims with no source?**
 A claim with a fabricated citation is worse than no citation at all. If arXiv finds nothing, the sentence silently reverts to plain text.
 
-**Why buffer the full response before display?**
-Veriphy needs the complete response to identify which sentences are claims. Buffering gives a clean single-pass annotated result. The raw unverified text is never shown.
+**Why buffer the full response before processing?**
+Veriphy needs the complete response to identify which sentences are claims. Buffering gives a clean single-pass annotated result. The raw, unverified text is never shown.
 
 ---
 
 ## JSON Parsing Robustness
 
-Step 1 asks Nemotron to return a JSON array. Because Nemotron is a reasoning model, its output may include thinking tokens, markdown, or occasionally malformed character sequences. The parser uses three fallback levels:
+Step 1 asks the LLM to return a JSON array. Because reasoning models may include thinking tokens, markdown fences, or malformed characters, the parser uses three fallback levels:
 
-1. **Whole-array parse** — `JSON.parse` on the bracket-balanced `[{...}]` block. The balancer is string-aware: it ignores `[` and `]` that appear inside JSON string values, so sentences like `"The formula H[X]..."` don't truncate the array.
-2. **Control-char cleanup** — strips raw newlines and other control characters embedded in string values, then re-tries `JSON.parse`.
+1. **Whole-array parse** — `JSON.parse` on the bracket-balanced `[{...}]` block. The balancer is string-aware so sentences like `"The formula H[X]..."` do not truncate the array.
+2. **Control-char cleanup** — strips raw newlines and control characters embedded in string values, then retries `JSON.parse`.
 3. **Object-by-object extraction** — scans for individual `{...}` blobs and parses each independently. A single malformed sentence cannot drop the rest of the response.
 
 ---
