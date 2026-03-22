@@ -267,7 +267,7 @@ function parseArxivEntry(entryXml: string): string | null {
 
 async function runArxivQuery(query: string, maxResults = 4): Promise<string[]> {
   try {
-    const url = `https://export.arxiv.org/api/query?search_query=${encodeURIComponent(query)}&max_results=${maxResults}&sortBy=relevance`;
+    const url = `https://export.arxiv.org/api/query?search_query=${encodeURIComponent(query)}&max_results=${maxResults}&sortBy=submittedDate&sortOrder=ascending`;
     if (process.env.DEBUG === "1") console.log("[arXiv] query:", query);
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!res.ok) return [];
